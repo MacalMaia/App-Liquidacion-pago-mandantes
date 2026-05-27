@@ -12,8 +12,8 @@ except ImportError:
 
 # Configuración
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-MODEL1 = "claude-opus-4-1-20250805"
-MODEL2 = "claude-sonnet-4-6"
+MODEL1 = "claude-opus-4-5"
+MODEL2 = "claude-sonnet-4-5"
 
 client = Anthropic(api_key=API_KEY)
 
@@ -30,6 +30,9 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
         '"representante_legal","paga_publicidad","monto_publicidad_pesos"]. '
         "Reglas:\n"
         "- comision_macal: porcentaje o monto en pesos que cobra Macal por la venta. "
+        "CRÍTICO: el porcentaje es SIEMPRE un número entre 0 y 100, NO entre 0 y 1. "
+        "Ejemplos: 'dos coma cero por ciento' = 2.0, 'dos punto cinco por ciento' = 2.5, '15%' = 15.0. "
+        "NUNCA devuelvas 0.02 ni 0.2 cuando el texto dice '2%' o 'dos por ciento'. "
         "IMPORTANTE: si el documento menciona que la comisión está en una tabla anexa o protocolizada, "
         "busca esa tabla en el mismo PDF (puede estar al final o como página separada) y extrae el porcentaje base o general. "
         "Si la tabla tiene múltiples filas por tipo de propiedad, extrae el porcentaje que aplica a departamentos o el valor más frecuente. "
@@ -88,8 +91,22 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
     if not content_blocks or content_blocks[0].type != "text":
         raise RuntimeError("Respuesta inesperada del modelo.")
 
-    raw_json = _limpiar_json(content_blocks[0].text)
-    data = json.loads(raw_json)
+    raw_original = content_blocks[0].text
+    raw_json = _limpiar_json(raw_original)
+
+    if not raw_json:
+        raise RuntimeError(
+            f"El modelo devolvió una respuesta vacía o no JSON para el mandato.\n"
+            f"Respuesta original: {repr(raw_original[:200])}"
+        )
+
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"No se pudo parsear la respuesta del mandato como JSON: {e}\n"
+            f"Respuesta recibida: {repr(raw_json[:300])}"
+        ) from e
 
     print(data)
 
@@ -102,7 +119,13 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
         s = str(v).strip().replace(".", "").replace(",", "")
         return int(s) if s.isdigit() else None
 
-    data["comision_macal"] = _float_or_none(data.get("comision_macal"))
+    com_raw = _float_or_none(data.get("comision_macal"))
+    # Corrección automática: si el modelo devolvió un decimal fraccional (ej: 0.2 en vez de 2.0)
+    # se corrige multiplicando por 100. Aplica solo cuando 0 < valor < 1.
+    if com_raw is not None and 0 < com_raw < 1:
+        com_raw = round(com_raw * 100, 4)
+        print(f"[AVISO] comision_macal corregida de fracción a porcentaje: {data.get('comision_macal')} → {com_raw}")
+    data["comision_macal"] = com_raw
     data["monto_publicidad_pesos"] = to_int_or_null(data.get("monto_publicidad_pesos"))
 
     # Normalizar tramos_premio
@@ -117,6 +140,13 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
         s = str(v).strip().replace("$", "").replace(".", "").replace(",", "").replace(" ", "")
         return int(s) if re.fullmatch(r"\d+", s) else None
 
+    def _corregir_porcentaje(v):
+        """Si el modelo devolvió fracción decimal (ej: 0.025) en vez de porcentaje (2.5), corrige."""
+        f = _float_or_none(v) or 0.0
+        if 0 < f < 1:
+            f = round(f * 100, 4)
+        return f
+
     tramos_limpios = []
     for t in tramos_raw:
         if not isinstance(t, dict):
@@ -125,7 +155,7 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
             "tipo_propiedad": t.get("tipo_propiedad"),
             "base_uf": _float_or_none(t.get("base_uf")) or 0.0,
             "base_pesos": _to_int_pesos(t.get("base_pesos")),
-            "porcentaje": _float_or_none(t.get("porcentaje")) or 0.0,
+            "porcentaje": _corregir_porcentaje(t.get("porcentaje")),
             "condicion": str(t.get("condicion") or ""),
         })
     data["tramos_premio"] = tramos_limpios
@@ -143,16 +173,34 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
 
 # ========== Utiles ==========
 def _limpiar_json(raw: str) -> str:
-    """Elimina bloques markdown ```json ... ``` que algunos modelos agregan."""
+    """
+    Extrae el primer objeto JSON de la respuesta del modelo.
+    Maneja bloques markdown ```json ... ```, texto previo al JSON,
+    y respuestas vacías.
+    """
     raw = raw.strip()
+    if not raw:
+        return ""
+
+    # Quitar bloque markdown si existe
     if raw.startswith("```"):
         lines = raw.splitlines()
-        # quitar primera y última línea si son fence de markdown
         if lines[0].startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         raw = "\n".join(lines).strip()
+
+    # Si ya empieza con '{', devolver tal cual
+    if raw.startswith("{"):
+        return raw
+
+    # Intentar extraer el primer objeto JSON del texto
+    inicio = raw.find("{")
+    fin = raw.rfind("}")
+    if inicio != -1 and fin != -1 and fin > inicio:
+        return raw[inicio:fin + 1]
+
     return raw
 
 def construir_mensaje_liquidacion(encoded_pdf: str):
@@ -175,10 +223,14 @@ def construir_mensaje_liquidacion(encoded_pdf: str):
         "  Devuelve EXACTAMENTE una de estas palabras (en minúsculas): 'departamento', 'estacionamiento', 'bodega', 'casa', 'terreno', 'local', 'oficina', 'otro'. "
         "  Si no es posible determinarlo, devuelve null.\n"
         "- valor_adjudicacion_pesos: la PRIMERA línea (primer ítem) de la columna 'CARGO'. Devuelve como entero sin separadores (ej: 1234567). Si la columna está vacía o no existe, devuelve null.\n"
-        "- valor_adjudicacion_uf: la PRIMERA línea (primer ítem) de la columna 'CARGO UF'. Devuelve número con punto decimal (ej: 123.45).\n"
+        "- valor_adjudicacion_uf: la PRIMERA línea (primer ítem) de la columna 'CARGO UF'. Devuelve número con punto decimal (ej: 800.0).\n"
         "- precio_proyectado_uf: precio proyectado o mínimo de la propiedad en UF. Puede aparecer como 'Precio proyectado', 'Mínimo', 'Base', 'Proyectado' o similar. Devuelve número con punto decimal. Si no existe, devuelve null.\n"
         "- fecha_subasta: la fecha que aparece en la fila/etiqueta 'Remate efectuado en', devuelve la fecha en formato dd-mm-yyyy.\n"
-        "- uf_dia_subasta: la PRIMERA fila de la columna 'VALOR UF'. Devuelve número con punto decimal.\n"
+        "- uf_dia_subasta: la PRIMERA fila de la columna 'VALOR UF'. "
+        "CRÍTICO: este valor es el precio en PESOS CHILENOS de 1 UF, típicamente entre 30.000 y 50.000 pesos. "
+        "El documento usa formato chileno donde el punto es separador de miles y la coma es el decimal. "
+        "Ejemplo: '$40.307,26' en el PDF = 40307.26 en el JSON (NO 40.30726). "
+        "Devuelve SIEMPRE un número mayor a 1000.\n"
         "- abonos_comprador_pesos: valor de la fila 'ABONADO EN PESOS'. Devuelve entero sin separadores.\n"
         "Reglas generales:\n"
         "- Si un dato no existe o no es claramente identificable, devuelve null.\n"
@@ -243,17 +295,39 @@ def extraer_json_liquidacion(pdf_path: Path) -> dict:
 
     if not resp.content or resp.content[0].type != "text":
         raise RuntimeError("Respuesta inesperada del modelo de Anthropic.")
-    raw = _limpiar_json(resp.content[0].text)
+    raw_original = resp.content[0].text
+    raw = _limpiar_json(raw_original)
 
-    # Asegura JSON válido
-    data = json.loads(raw)
+    if not raw:
+        raise RuntimeError(
+            f"El modelo devolvió una respuesta vacía o no JSON para la liquidación.\n"
+            f"Respuesta original: {repr(raw_original[:200])}"
+        )
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"No se pudo parsear la respuesta del modelo como JSON: {e}\n"
+            f"Respuesta recibida: {repr(raw[:300])}"
+        ) from e
 
     # Coerciones de tipo y normalizaciones
     data["valor_adjudicacion_pesos"] = parse_int_or_null(data.get("valor_adjudicacion_pesos"))
     data["abonos_comprador_pesos"] = parse_int_or_null(data.get("abonos_comprador_pesos"))
     data["valor_adjudicacion_uf"] = parse_float_or_null(data.get("valor_adjudicacion_uf"))
-    data["uf_dia_subasta"] = parse_float_or_null(data.get("uf_dia_subasta"))
     data["precio_proyectado_uf"] = parse_float_or_null(data.get("precio_proyectado_uf"))
+
+    uf_raw = parse_float_or_null(data.get("uf_dia_subasta"))
+    # Corrección: el modelo a veces devuelve 40.30726 en vez de 40307.26 (confunde miles/decimales).
+    # El UF en Chile siempre vale más de 1.000 pesos. Si es < 1000, se asume que está mal escalado.
+    # Se usa round(..., 2) para preservar los centavos sin errores de punto flotante.
+    # Ej: 40.30726 × 1000 = 40307.26 (con 2 decimales de centavos)
+    if uf_raw is not None and 0 < uf_raw < 1000:
+        uf_corregido = round(uf_raw * 1000, 2)
+        print(f"[AVISO] uf_dia_subasta corregido: {uf_raw} → {uf_corregido} (el modelo confundió separadores)")
+        uf_raw = uf_corregido
+    data["uf_dia_subasta"] = uf_raw
     # tipo_propiedad: normalizar a minúsculas, validar vocabulario
     _tipos_validos = {"departamento","estacionamiento","bodega","casa","terreno","local","oficina","otro"}
     tp = (data.get("tipo_propiedad") or "").strip().lower()
