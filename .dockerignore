@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+venv_mac/
+.venv/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/.env*
+
+# Entornos y secretos
+.env
+*.env
+
+# PDFs de clientes
+*.pdf
+
+# Git y herramientas
+.git/
+.gitignore
+.cursor/
+*.log
+
+# Tkinter desktop app (no va al contenedor)
+main.py
+App\ Liquidacion.bat
+App\ Liquidacion/
+
+# Planes y documentación local
+*.plan.md

@@ -9,6 +9,14 @@ venv_mac/
 # Copia antigua (Windows)
 App Liquidacion/
 
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env*
+
+# Backend compiled
+backend/__pycache__/
+
 # Variables de entorno / secretos
 .env
 
