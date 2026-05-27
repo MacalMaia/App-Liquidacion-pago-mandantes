@@ -11,8 +11,8 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfbase.pdfmetrics import registerFontFamily
 
-# Paths relative to this file
-_HERE = Path(__file__).parent
+# Paths relative to this file — fonts y logo están en backend/app/
+_HERE = Path(__file__).parent.parent
 
 pdfmetrics.registerFont(TTFont("Montserrat", str(_HERE / "fonts" / "Montserrat-Regular.ttf")))
 pdfmetrics.registerFont(TTFont("Montserrat-Bold", str(_HERE / "fonts" / "Montserrat-Bold.ttf")))
@@ -170,10 +170,10 @@ def _build(resultado: dict, dest):
         colWidths=[1.5 * cm, 6 * cm, 3.5 * cm, 3 * cm, 4 * cm],
     )
     prop_table.setStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), PURPLE),
+        ("BACKGROUND", (0, 0), (-1, 0), ORANGE),
         ("BACKGROUND", (0, 1), (-1, 1), GRAY_LIGHT),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CCCCCC")),
-        ("BOX", (0, 0), (-1, -1), 1, PURPLE),
+        ("BOX", (0, 0), (-1, -1), 1, ORANGE),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [GRAY_LIGHT, WHITE]),

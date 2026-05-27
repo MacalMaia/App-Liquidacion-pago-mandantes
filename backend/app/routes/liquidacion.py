@@ -71,8 +71,13 @@ async def generar_pdf_endpoint(resultado: dict):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generando PDF: {e}")
 
+    ident = resultado.get("identificacion", {})
+    fecha = (ident.get("fecha_subasta") or "").replace("-", "")
+    lote = ident.get("numero_lote") or ""
+    filename = f"preliquidacion_{fecha}_lote{lote}.pdf" if (fecha or lote) else "preliquidacion.pdf"
+
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=liquidacion_mandante.pdf"},
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
     )

@@ -44,7 +44,10 @@ export async function descargarPDF(resultado: ResultadoLiquidacion): Promise<voi
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "liquidacion_mandante.pdf";
+  // Usar el nombre que sugiere el Content-Disposition del servidor
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const match = disposition.match(/filename=([^\s;]+)/);
+  a.download = match ? match[1] : "preliquidacion.pdf";
   a.click();
   URL.revokeObjectURL(url);
 }
