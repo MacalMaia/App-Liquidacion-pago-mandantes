@@ -172,7 +172,9 @@ def generar_pdf(resultado, output_path="liquidacion_mandante.pdf"):
     # Construye etiqueta premio con tramo aplicado
     tramo = param.get("tramo_aplicado")
     if tramo:
-        etiqueta_premio = f"Premio Macal ({tramo.get('porcentaje',0):,}% sobre {tramo.get('base_uf',0):,} UF)".replace(".", ",")
+        # Preferir base_uf_efectiva (que puede venir de base_pesos convertida) sobre base_uf raw
+        base_uf_mostrar = tramo.get("base_uf_efectiva") or tramo.get("base_uf") or 0.0
+        etiqueta_premio = f"Premio Macal ({tramo.get('porcentaje', 0):,}% sobre {base_uf_mostrar:,.2f} UF)".replace(".", ",")
     else:
         etiqueta_premio = "Premio Macal"
     
