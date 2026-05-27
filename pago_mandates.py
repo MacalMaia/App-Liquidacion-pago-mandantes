@@ -38,15 +38,17 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
         "- Determinar si las condiciones pactadas incluyen pago de premio (true/false). Esta condición se encuentra únicamente en la sección PREMIO.\n"
         "- 'tramos_premio': array con TODOS los tramos de premio definidos en el mandato. Si paga_premio es false, devuelve []. "
         "Cada elemento del array tiene EXACTAMENTE estas claves: "
-        "{\"tipo_propiedad\": string o null, \"base_uf\": número decimal, \"porcentaje\": número decimal, \"condicion\": string}. "
+        "{\"tipo_propiedad\": string o null, \"base_uf\": número decimal, \"base_pesos\": número entero o null, \"porcentaje\": número decimal, \"condicion\": string}. "
         "Reglas de tramos_premio:\n"
         "  * tipo_propiedad: categoría de propiedad a la que aplica el tramo (ej: 'departamento', 'estacionamiento', 'casa', 'bodega'). "
         "    Si aplica a todos los tipos, usar null.\n"
         "  * base_uf: umbral mínimo en UF que debe alcanzar la adjudicación para que aplique este tramo. "
-        "    Si el tramo aplica desde 0 UF (cualquier adjudicación), usar 0.0.\n"
-        "  * porcentaje: porcentaje del diferencial (adj_uf - base_uf) que se paga como premio. Número decimal (ej: 2.5).\n"
+        "    Usar SOLO si el umbral está expresado explícitamente en UF en el mandato. Si no está en UF, usar 0.0.\n"
+        "  * base_pesos: umbral mínimo en PESOS CHILENOS. Usar si el umbral está expresado en pesos (ej: '$6.000.000', '6 millones de pesos'). "
+        "    Si el umbral ya está en UF (campo base_uf), usar null aquí. Si el tramo aplica desde 0 sin umbral, usar null.\n"
+        "  * porcentaje: porcentaje del diferencial (monto adjudicado - umbral base) que se paga como premio. Número decimal (ej: 2.5).\n"
         "  * condicion: texto literal del mandato que describe la condición de este tramo, incluyendo si hay IVA, si depende de proyectado, etc.\n"
-        "  IMPORTANTE: si el mandato define distintos umbrales UF para el mismo tipo de propiedad (ej: 1% hasta X UF, 2.5% sobre X+1 UF, 15% sobre Y UF), "
+        "  IMPORTANTE: si el mandato define distintos umbrales para el mismo tipo de propiedad (ej: 1% hasta X, 2.5% sobre X, 15% sobre Y), "
         "  crea UN tramo por cada umbral. NO simplifiques ni promedies. Extrae cada tramo exactamente como está escrito.\n"
         "- 'condicion_premio': texto completo y literal de la sección PREMIO del mandato, sin omitir nada.\n"
         "- representante_legal: En caso que no se mencione ningun representante legal, usa null.\n"
@@ -107,13 +109,22 @@ def extract_json_mandato_from_pdf(pdf_path: Path) -> dict:
     tramos_raw = data.get("tramos_premio")
     if not isinstance(tramos_raw, list):
         tramos_raw = []
+    def _to_int_pesos(v):
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        s = str(v).strip().replace("$", "").replace(".", "").replace(",", "").replace(" ", "")
+        return int(s) if re.fullmatch(r"\d+", s) else None
+
     tramos_limpios = []
     for t in tramos_raw:
         if not isinstance(t, dict):
             continue
         tramos_limpios.append({
-            "tipo_propiedad": t.get("tipo_propiedad"),  # str o null
+            "tipo_propiedad": t.get("tipo_propiedad"),
             "base_uf": _float_or_none(t.get("base_uf")) or 0.0,
+            "base_pesos": _to_int_pesos(t.get("base_pesos")),
             "porcentaje": _float_or_none(t.get("porcentaje")) or 0.0,
             "condicion": str(t.get("condicion") or ""),
         })
@@ -360,6 +371,15 @@ def liquidar_pago(liq: dict, man: dict, *, iva_rate=0.19, iva_comision=True, iva
     tramo_aplicado = None
     if paga_premio and tramos_premio:
         if adj_uf is not None and uf_valor is not None:
+
+            def _base_uf_efectiva(t):
+                """Devuelve el umbral en UF del tramo, convirtiendo base_pesos si es necesario."""
+                base_uf = t.get("base_uf") or 0.0
+                base_ps = t.get("base_pesos")
+                if base_uf == 0.0 and base_ps and base_ps > 0 and uf_valor > 0:
+                    return base_ps / uf_valor
+                return base_uf
+
             # 1. Filtrar tramos que aplican a este tipo de propiedad
             #    Un tramo con tipo_propiedad=null aplica a todos.
             candidatos = [
@@ -371,11 +391,11 @@ def liquidar_pago(liq: dict, man: dict, *, iva_rate=0.19, iva_comision=True, iva
                 # Si ningún tramo coincide por tipo, usar todos (mandato sin distinción de tipo)
                 candidatos = tramos_premio
 
-            # 2. Elegir el tramo de mayor base_uf que la adjudicación supera
-            candidatos_alcanzados = [t for t in candidatos if adj_uf >= t.get("base_uf", 0.0)]
+            # 2. Elegir el tramo de mayor base efectiva (UF o pesos→UF) que la adjudicación supera
+            candidatos_alcanzados = [t for t in candidatos if adj_uf >= _base_uf_efectiva(t)]
             if candidatos_alcanzados:
-                max_base = max(t.get("base_uf", 0.0) for t in candidatos_alcanzados)
-                empate = [t for t in candidatos_alcanzados if t.get("base_uf", 0.0) == max_base]
+                max_base = max(_base_uf_efectiva(t) for t in candidatos_alcanzados)
+                empate = [t for t in candidatos_alcanzados if _base_uf_efectiva(t) == max_base]
 
                 if len(empate) == 1:
                     tramo_aplicado = empate[0]
@@ -384,7 +404,7 @@ def liquidar_pago(liq: dict, man: dict, *, iva_rate=0.19, iva_comision=True, iva
                     cumple = None
                     if precio_proyectado_uf is not None and adj_uf is not None:
                         cumple = adj_uf >= precio_proyectado_uf
-                    
+
                     if cumple is True:
                         pref = [t for t in empate if any(w in t.get("condicion","").lower() for w in ("proyectado","cumple","supera"))]
                         tramo_aplicado = pref[0] if pref else empate[-1]
@@ -395,16 +415,19 @@ def liquidar_pago(liq: dict, man: dict, *, iva_rate=0.19, iva_comision=True, iva
                         # precio_proyectado_uf no disponible: tomar el de menor porcentaje y alertar
                         tramo_aplicado = min(empate, key=lambda t: t.get("porcentaje", 0.0))
                         alertas.append(
-                            f"Hay {len(empate)} tramos con la misma base UF para '{tipo_propiedad_liq}' "
+                            f"Hay {len(empate)} tramos con la misma base para '{tipo_propiedad_liq}' "
                             "y no se encontró precio proyectado en la liquidación. "
                             "Se aplicó el porcentaje menor. Verificar manualmente."
                         )
 
-                base_uf_tramo = tramo_aplicado["base_uf"]
+                base_uf_tramo = _base_uf_efectiva(tramo_aplicado)
                 pct_tramo = tramo_aplicado["porcentaje"]
                 diferencial_uf  = max(0.0, adj_uf - base_uf_tramo)
                 diferencial_clp = _round0(diferencial_uf * uf_valor)
                 premio = _round0(diferencial_clp * (pct_tramo / 100.0))
+                # Guardar la base efectiva en UF para mostrarlo correctamente en el PDF
+                tramo_aplicado = dict(tramo_aplicado)
+                tramo_aplicado["base_uf_efectiva"] = base_uf_tramo
             else:
                 alertas.append(
                     f"Adjudicación ({adj_uf} UF) no alcanza ningún umbral de premio "
@@ -454,16 +477,20 @@ def liquidar_pago(liq: dict, man: dict, *, iva_rate=0.19, iva_comision=True, iva
 
     # ======== PAGO AL MANDANTE COMPLETO O SEPARADO ==========
     if vale_vista_var == "No":
-        teorico_vendedor = abonos - deducciones if adj_pesos is not None else None
+        teorico_vendedor = (abonos - deducciones) if (abonos is not None and adj_pesos is not None) else None
     elif vale_vista_var == "Sí":
         if not monto_vale_vista or monto_vale_vista <= 0:
                 alertas.append("Forma de pago 'Incluye Vale Vista' sin 'monto_vale_vista' válido.")
-        teorico_vendedor = abonos - monto_vale_vista - deducciones if adj_pesos is not None else None
+        teorico_vendedor = (abonos - monto_vale_vista - deducciones) if (abonos is not None and adj_pesos is not None) else None
     else:
         alertas.append("Debe seleccionar si la forma de pago incluye Vale Vista")
-        teorico_vendedor = abonos - deducciones if adj_pesos is not None else None
+        teorico_vendedor = (abonos - deducciones) if (abonos is not None and adj_pesos is not None) else None
     
-    saldo_por_pagar = max(0, min(abonos, teorico_vendedor))
+    if abonos is not None and teorico_vendedor is not None:
+        saldo_por_pagar = max(0, min(abonos, teorico_vendedor))
+    else:
+        saldo_por_pagar = None
+        alertas.append("No se pudo calcular saldo por pagar: faltan abonos o liquidación teórica.")
 
     # ===== 4) SALIDA ESTRUCTURADA =====
     return {
