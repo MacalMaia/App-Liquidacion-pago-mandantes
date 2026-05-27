@@ -1,5 +1,129 @@
 # Contexto del Proyecto — App Liquidación Pago Mandantes
 
+---
+
+## Webapp en GCP (v2)
+
+La aplicación ahora tiene dos modos de uso:
+- **Desktop (Tkinter)**: `main.py` — uso local sin cambios
+- **Webapp (FastAPI + React)**: `backend/` + `frontend/` — desplegable en Cloud Run
+
+### Estructura del repo
+
+```
+backend/
+  app/
+    main.py                  # FastAPI app, monta frontend/dist como static
+    routes/liquidacion.py    # POST /api/liquidar, POST /api/pdf
+    services/pago_mandates.py  # lógica de extracción y cálculo (acepta bytes)
+    services/generar_pdf.py    # genera PDF rediseñado, devuelve bytes
+    auth/sso_microsoft.py      # stub comentado de SSO Microsoft
+    fonts/                   # Montserrat
+    logo/
+  requirements.txt
+frontend/
+  src/
+    pages/Liquidador.tsx     # página única con stepper de 4 pasos
+    components/              # Header, PDFDropzone, ParametrosLegalesForm, ResultadoCard, LoadingState
+    lib/api.ts               # llamadas al backend
+    lib/types.ts             # tipos TypeScript
+  tailwind.config.js         # paleta naranja/morado/gris
+Dockerfile                   # multi-stage: build React → uvicorn
+cloudbuild.yaml              # CI/CD: build → push → deploy a Cloud Run
+.env.example                 # template de variables de entorno
+```
+
+### Correr localmente (desarrollo)
+
+```bash
+# Backend
+cd backend
+pip install -r requirements.txt
+ANTHROPIC_API_KEY=sk-ant-... uvicorn app.main:app --reload --port 8000
+
+# Frontend (en otra terminal)
+cd frontend
+npm install
+npm run dev          # http://localhost:5173 (proxy a :8000 via vite.config.ts)
+```
+
+### Deploy en GCP Cloud Run
+
+#### 1. Configuración inicial (solo una vez)
+
+```bash
+PROJECT_ID="TU-PROYECTO-GCP"   # cambia esto
+REGION="southamerica-west1"
+SERVICE="liquidador"
+REPO="liquidador-repo"
+
+# Habilitar APIs
+gcloud services enable run.googleapis.com \
+  cloudbuild.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  --project=$PROJECT_ID
+
+# Crear repositorio de imágenes
+gcloud artifacts repositories create $REPO \
+  --repository-format=docker \
+  --location=$REGION \
+  --project=$PROJECT_ID
+
+# Guardar API key como secret
+echo -n "sk-ant-TU-API-KEY" | \
+  gcloud secrets create anthropic-api-key \
+    --data-file=- \
+    --replication-policy=automatic \
+    --project=$PROJECT_ID
+
+# Dar acceso al Cloud Build service account al secret
+PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
+gcloud secrets add-iam-policy-binding anthropic-api-key \
+  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=$PROJECT_ID
+
+# Lo mismo para la cuenta de Cloud Run
+gcloud secrets add-iam-policy-binding anthropic-api-key \
+  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project=$PROJECT_ID
+```
+
+#### 2. Deploy
+
+```bash
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions _PROJECT_ID=$PROJECT_ID,_REGION=$REGION,_SERVICE_NAME=$SERVICE,_REPO_NAME=$REPO \
+  --project=$PROJECT_ID
+```
+
+#### 3. Ver la URL del servicio
+
+```bash
+gcloud run services describe $SERVICE --region=$REGION --format='value(status.url)'
+```
+
+### Activar SSO Microsoft (cuando se requiera)
+
+1. Registrar aplicación en Azure AD (portal.azure.com → App registrations).
+2. Agregar secrets en Secret Manager:
+   ```bash
+   gcloud secrets create ms-client-id --data-file=- <<< "TU-CLIENT-ID"
+   gcloud secrets create ms-tenant-id --data-file=- <<< "TU-TENANT-ID"
+   gcloud secrets create ms-client-secret --data-file=- <<< "TU-SECRET"
+   ```
+3. Agregar al `--set-secrets` en `cloudbuild.yaml`:
+   ```
+   MS_CLIENT_ID=ms-client-id:latest,MS_TENANT_ID=ms-tenant-id:latest,MS_CLIENT_SECRET=ms-client-secret:latest
+   ```
+4. En `backend/app/main.py`, descomentar las líneas del `MicrosoftSSOMiddleware`.
+5. En `backend/app/auth/sso_microsoft.py`, descomentar todo el código.
+6. Redesplegar.
+
+---
+
 ## Propósito
 
 Aplicación de escritorio para el equipo de Macal que calcula y genera la liquidación de pago al mandante (vendedor) de una propiedad subastada. A partir de dos PDFs —el mandato legalizado y la liquidación de pago emitida por CORE— calcula la comisión, IVA, premio, gastos adicionales y el saldo final a pagar al mandante, y genera un PDF de liquidación con la marca de Macal.
