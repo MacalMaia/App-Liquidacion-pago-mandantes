@@ -1,0 +1,29 @@
+# Entorno virtual
+venv/
+venv_mac/
+.venv/
+
+# Cursor IDE / debug logs
+.cursor/
+
+# Copia antigua (Windows)
+App Liquidacion/
+
+# Variables de entorno / secretos
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+
+# PDFs de trabajo (no subir documentos de clientes)
+*.pdf
+
+# Distribución
+dist/
+build/
+*.zip
