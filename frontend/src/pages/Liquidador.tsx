@@ -119,7 +119,7 @@ export default function Liquidador() {
               <PDFDropzone label="Mandato notarial" file={mandatoFile} onChange={setMandatoFile} />
             </div>
             <div>
-              <p className="text-xs font-medium text-brand-gray-300 mb-2">Liquidación de Pago (CORE)</p>
+              <p className="text-xs font-medium text-brand-gray-300 mb-2">Liquidación de Pago (MAIA)</p>
               <PDFDropzone label="Liquidación de Pago" file={liquidacionFile} onChange={setLiquidacionFile} />
             </div>
           </div>
