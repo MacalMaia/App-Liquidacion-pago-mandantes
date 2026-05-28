@@ -111,7 +111,7 @@ export default function Liquidador() {
         <div className="card space-y-4">
           <h2 className="font-bold text-lg text-brand-gray-500">Cargar documentos</h2>
           <p className="text-sm text-brand-gray-200">
-            Sube el mandato notarial y la liquidación de pago del sistema CORE.
+            Sube el mandato notarial y la liquidación de pago.
           </p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
