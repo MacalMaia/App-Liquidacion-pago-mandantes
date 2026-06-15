@@ -45,6 +45,11 @@ _PUBLIC_PATHS = {
     "/auth/callback",
     "/auth/logout",
     "/healthz",
+    "/favicon.ico",
+    "/favicon.svg",
+    "/manifest.json",
+    "/robots.txt",
+    "/site.webmanifest",
 }
 
 
@@ -95,11 +100,18 @@ auth_router = APIRouter(prefix="/auth", tags=["auth"])
 async def login(request: Request):
     if not sso_configured():
         raise HTTPException(status_code=503, detail="SSO no configurado")
+
+    # Reutilizamos el flow existente si ya hay uno en sesión. Esto evita
+    # sobrescribir el state cuando el browser hace requests paralelos
+    # (favicon, manifest, etc.) que también caen aquí sin autenticación.
+    existing = request.session.get("auth_flow")
+    if existing and "auth_uri" in existing:
+        return RedirectResponse(url=existing["auth_uri"])
+
     flow = _build_msal_app().initiate_auth_code_flow(
         scopes=MS_SCOPES,
         redirect_uri=MS_REDIRECT_URI,
     )
-    # Guardamos el flow para validarlo en el callback (protege contra CSRF).
     request.session["auth_flow"] = flow
     return RedirectResponse(url=flow["auth_uri"])
 
