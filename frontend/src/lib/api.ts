@@ -2,6 +2,16 @@ import type { ResultadoLiquidacion, FormData } from "./types";
 
 const BASE = import.meta.env.VITE_API_URL ?? "";
 
+// Si el backend responde 401 (sesión SSO expirada o ausente), redirige al login
+// de Microsoft. Devuelve la respuesta intacta cuando no es 401.
+function handleAuth(res: Response): Response {
+  if (res.status === 401) {
+    window.location.href = `${BASE}/auth/login`;
+    throw new Error("Redirigiendo al inicio de sesión…");
+  }
+  return res;
+}
+
 export async function liquidar(
   mandatoFile: File,
   liquidacionFile: File,
@@ -25,7 +35,13 @@ export async function liquidar(
   }
   body.append("descuenta_gastos", form.descuenta_gastos || "Sí");
 
-  const res = await fetch(`${BASE}/api/liquidar`, { method: "POST", body });
+  const res = handleAuth(
+    await fetch(`${BASE}/api/liquidar`, {
+      method: "POST",
+      body,
+      credentials: "include",
+    })
+  );
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(err.detail ?? "Error desconocido");
@@ -34,11 +50,14 @@ export async function liquidar(
 }
 
 export async function descargarPDF(resultado: ResultadoLiquidacion): Promise<void> {
-  const res = await fetch(`${BASE}/api/pdf`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(resultado),
-  });
+  const res = handleAuth(
+    await fetch(`${BASE}/api/pdf`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(resultado),
+      credentials: "include",
+    })
+  );
   if (!res.ok) throw new Error("Error generando PDF");
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);

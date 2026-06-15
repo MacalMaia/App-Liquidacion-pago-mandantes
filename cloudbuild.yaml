@@ -56,6 +56,9 @@ steps:
       - "4"
       - --max-instances
       - "5"
+      # Las variables/secretos de SSO se gestionan directamente en el servicio
+      # de Cloud Run (panel "Variables y secretos"). Un deploy sin --set-env-vars
+      # ni --set-secrets conserva las variables ya configuradas en el servicio.
       - --set-secrets
       - "ANTHROPIC_API_KEY=anthropic-api-key:latest"
 
