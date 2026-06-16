@@ -80,7 +80,6 @@ def _build(resultado: dict, dest):
     ident = resultado.get("identificacion", {})
     insum = resultado.get("insumos", {})
     param = resultado.get("parametros", {})
-    alertas = resultado.get("alertas", [])
 
     meses = {1:"enero",2:"febrero",3:"marzo",4:"abril",5:"mayo",6:"junio",
              7:"julio",8:"agosto",9:"septiembre",10:"octubre",11:"noviembre",12:"diciembre"}
@@ -326,18 +325,11 @@ def _build(resultado: dict, dest):
         ])
         elements.append(gasto_table2)
 
-    # Alertas
-    if alertas:
-        elements.append(Spacer(1, 10))
-        elements.append(Paragraph("Avisos del sistema", S["section"]))
-        for a in alertas:
-            elements.append(Paragraph(f"• {a}", S["small_gray"]))
-
     # Footer
     elements.append(Spacer(1, 14))
     elements.append(HRFlowable(width="100%", thickness=0.5, color=GRAY_LIGHT, spaceAfter=4))
     elements.append(Paragraph(
-        f"Documento generado el {fecha_hoy} — Macal Corretajes de Propiedades — Solo para uso interno.",
+        f"Documento generado el {fecha_hoy} — Macal LTDA",
         S["small_gray"],
     ))
 
