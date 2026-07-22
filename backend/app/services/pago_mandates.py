@@ -165,25 +165,36 @@ def construir_mensaje_liquidacion(encoded_pdf: str):
         "con EXACTAMENTE estas claves en español:\n"
         '["cliente_vendedor","numero_lote","propiedad","comuna","tipo_propiedad","valor_adjudicacion_pesos","valor_adjudicacion_uf",'
         '"precio_proyectado_uf","fecha_subasta","uf_dia_subasta","abonos_comprador_pesos"].\n'
-        "Instrucciones del documento 'Liquidación de Pago':\n"
-        "- cliente_vendedor: texto del título principal que aparece justo ARRIBA de la frase 'Liquidación de Pago'. "
+        "El documento puede venir en DOS formatos distintos (identifica cuál es por su título):\n"
+        "  (A) título 'Liquidación de Pago', con columnas 'CARGO' (pesos) y 'CARGO UF'.\n"
+        "  (B) título 'SALDO - PRECIO', con una tabla de columnas FECHA | VALOR UF | CARGO UF | ABONO UF | ABONO, "
+        "      y una fila final 'ABONADO AL <fecha>' con el total pagado a la fecha.\n"
+        "Instrucciones por campo:\n"
+        "- cliente_vendedor: en formato (A) es el título principal que aparece justo ARRIBA de la frase 'Liquidación de Pago'. "
+        "  En formato (B) es el valor de la fila/etiqueta 'MANDANTE'. "
         "  No es el adjudicatario/comprador; es el vendedor/mandante de la propiedad.\n"
-        "- numero_lote: aparece junto a la palabra 'Lote' en la parte superior del documento. Devuelvelo como entero sin separadores.\n"
-        "- propiedad: es el texto que aparece en la fila/etiqueta 'Propiedad'. Devuelve exactamente el texto de esa fila/etiqueta sin agregar nada. Si no existe, usa null.\n"
-        "- comuna: es el texto que aparece en la fila/etiqueta 'Comuna'. Devuelve exactamente el texto de esa fila/etiqueta sin agregar nada. Si no existe, usa null.\n"
+        "- numero_lote: aparece junto a la palabra 'Lote' (NO junto a 'N° REMATE', que es un código alfanumérico distinto). Devuelvelo como entero sin separadores.\n"
+        "- propiedad: es el texto que aparece en la fila/etiqueta 'Propiedad' (o 'PROPIEDAD'). Devuelve exactamente el texto de esa fila/etiqueta sin agregar nada. Si no existe, usa null.\n"
+        "- comuna: es el texto que aparece en la fila/etiqueta 'Comuna' (o 'COMUNA'). Devuelve exactamente el texto de esa fila/etiqueta sin agregar nada. Si no existe, usa null.\n"
         "- tipo_propiedad: clasifica la propiedad según el campo 'Propiedad' o cualquier descripción del documento. "
         "  Devuelve EXACTAMENTE una de estas palabras (en minúsculas): 'departamento', 'estacionamiento', 'bodega', 'casa', 'terreno', 'local', 'oficina', 'otro'. "
         "  Si no es posible determinarlo, devuelve null.\n"
-        "- valor_adjudicacion_pesos: la PRIMERA línea (primer ítem) de la columna 'CARGO'. Devuelve como entero sin separadores (ej: 1234567). Si la columna está vacía o no existe, devuelve null.\n"
-        "- valor_adjudicacion_uf: la PRIMERA línea (primer ítem) de la columna 'CARGO UF'. Devuelve número con punto decimal (ej: 800.0).\n"
+        "- valor_adjudicacion_pesos: SOLO en formato (A), la PRIMERA línea (primer ítem) de la columna 'CARGO' (en pesos). "
+        "  En formato (B) esta columna en pesos NO EXISTE para la fila 'Precio de adjudicación' (solo existe 'CARGO UF'): en ese caso devuelve SIEMPRE null, "
+        "  el valor en pesos se calculará después a partir de la UF. "
+        "  CRÍTICO: NUNCA uses el valor de la fila 'ABONADO AL' ni de 'ABONO' (que son el total pagado por el comprador, un concepto distinto) como valor_adjudicacion_pesos, "
+        "  aunque sean el número en pesos más prominente del documento.\n"
+        "- valor_adjudicacion_uf: la PRIMERA línea (primer ítem, fila 'Precio de adjudicación') de la columna 'CARGO UF'. Devuelve número con punto decimal (ej: 800.0).\n"
         "- precio_proyectado_uf: precio proyectado o mínimo de la propiedad en UF. Puede aparecer como 'Precio proyectado', 'Mínimo', 'Base', 'Proyectado' o similar. Devuelve número con punto decimal. Si no existe, devuelve null.\n"
-        "- fecha_subasta: la fecha que aparece en la fila/etiqueta 'Remate efectuado en', devuelve la fecha en formato dd-mm-yyyy.\n"
-        "- uf_dia_subasta: la PRIMERA fila de la columna 'VALOR UF'. "
+        "- fecha_subasta: la fecha que aparece en la fila/etiqueta 'Remate efectuado en' o 'REMATE EFECTUADO EL', devuelve la fecha en formato dd-mm-yyyy.\n"
+        "- uf_dia_subasta: el valor de la columna 'VALOR UF' de la MISMA fila que 'Precio de adjudicación' (primera fila de la tabla). "
         "CRÍTICO: este valor es el precio en PESOS CHILENOS de 1 UF, típicamente entre 30.000 y 50.000 pesos. "
         "El documento usa formato chileno donde el punto es separador de miles y la coma es el decimal. "
         "Ejemplo: '$40.307,26' en el PDF = 40307.26 en el JSON (NO 40.30726). "
         "Devuelve SIEMPRE un número mayor a 1000.\n"
-        "- abonos_comprador_pesos: valor de la fila 'ABONADO EN PESOS'. Devuelve entero sin separadores.\n"
+        "- abonos_comprador_pesos: en formato (A), valor de la fila 'ABONADO EN PESOS'. "
+        "  En formato (B), valor en pesos (última columna) de la fila 'ABONADO AL <fecha>' (el total pagado a la fecha del documento). "
+        "  Devuelve entero sin separadores.\n"
         "Reglas generales:\n"
         "- Si un dato no existe o no es claramente identificable, devuelve null.\n"
         "- No incluyas texto adicional, comentarios, ni campos extra. SOLO el JSON minificado pedido."
@@ -350,11 +361,30 @@ def liquidar_pago(
 
     adj_uf_en_pesos = _round0(adj_uf * uf_valor) if (adj_uf is not None and uf_valor is not None) else None
 
+    # El valor en pesos extraído directamente de la liquidación (adj_pesos) es un campo
+    # ambiguo: en el formato "SALDO - PRECIO" no siempre existe una columna en pesos para
+    # la adjudicación, y la IA puede confundirlo con el total abonado por el comprador
+    # (que suele ser un valor muy cercano, ya que el saldo de precio termina en 0).
+    # Por eso, cuando es posible calcular adj_uf_en_pesos (UF adjudicada × valor UF del
+    # día), este se usa SIEMPRE como fuente de verdad, y el valor extraído solo sirve
+    # como chequeo cruzado para alertar si discrepa.
     if adj_pesos and adj_uf_en_pesos:
-        if abs(adj_pesos - adj_uf_en_pesos) / adj_pesos > 0.01:
-            alertas.append("Diferencia >1% entre adjudicación CLP y UF*valor UF.")
-
-    if adj_pesos is None and adj_uf_en_pesos is not None:
+        diff_pct = abs(adj_pesos - adj_uf_en_pesos) / adj_pesos
+        if abonos is not None and abs(adj_pesos - abonos) / adj_pesos < 0.02:
+            alertas.append(
+                f"valor_adjudicacion_pesos extraído (${adj_pesos:,}) coincide casi exactamente con "
+                f"abonos_comprador_pesos (${abonos:,}); probablemente la extracción confundió el total "
+                f"abonado con el valor de adjudicación. Se usó valor_adjudicacion_uf × uf_dia_subasta "
+                f"(${adj_uf_en_pesos:,}) como base — verificar manualmente."
+            )
+        elif diff_pct > 0.005:
+            alertas.append(
+                f"Diferencia de {diff_pct:.1%} entre valor_adjudicacion_pesos extraído (${adj_pesos:,}) "
+                f"y el cálculo UF×valor UF (${adj_uf_en_pesos:,}). Se usó el cálculo UF×valor UF como base "
+                "— verificar manualmente."
+            )
+        adj_pesos = adj_uf_en_pesos
+    elif adj_pesos is None and adj_uf_en_pesos is not None:
         adj_pesos = adj_uf_en_pesos
         alertas.append(
             "valor_adjudicacion_pesos no estaba en la liquidación; "
