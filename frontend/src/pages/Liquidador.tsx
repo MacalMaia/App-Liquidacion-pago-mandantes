@@ -87,7 +87,9 @@ export default function Liquidador() {
       setResultado(res);
       setStep(4);
     } catch (e: any) {
-      setError(e.message ?? "Error desconocido");
+      const msg = e?.message || String(e) || "Error desconocido al procesar";
+      setError(msg);
+      console.error("[Liquidador] error al calcular:", e);
     } finally {
       setLoading(false);
     }

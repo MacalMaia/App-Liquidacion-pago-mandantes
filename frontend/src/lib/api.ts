@@ -43,14 +43,24 @@ export async function liquidar(
     })
   );
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    const detail = err.detail;
-    const msg =
-      typeof detail === "string"
-        ? detail
-        : Array.isArray(detail)
-          ? detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join("; ")
-          : (detail && JSON.stringify(detail)) || res.statusText;
+    let msg = `Error ${res.status}`;
+    try {
+      const body = await res.text();
+      try {
+        const err = JSON.parse(body);
+        const detail = err.detail;
+        msg =
+          typeof detail === "string"
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join("; ")
+              : body || res.statusText;
+      } catch {
+        msg = body.slice(0, 300) || res.statusText;
+      }
+    } catch {
+      msg = res.statusText || `Error ${res.status}`;
+    }
     throw new Error(msg || "Error desconocido");
   }
   return res.json();
