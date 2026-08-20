@@ -41,6 +41,11 @@ async def liquidar(
         liq = extraer_json_liquidacion(liquidacion_bytes)
     except RuntimeError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No se pudieron leer los PDFs: {e}",
+        ) from e
 
     # Inyectar datos manuales
     man["vale_vista_var"] = vale_vista

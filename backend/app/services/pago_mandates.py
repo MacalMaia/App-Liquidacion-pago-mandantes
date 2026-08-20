@@ -1,19 +1,122 @@
-import json, base64, re, os
-from anthropic import Anthropic
+import json, base64, re, os, logging
+from io import BytesIO
+from anthropic import Anthropic, BadRequestError, APIError
 from decimal import Decimal, ROUND_HALF_UP
+from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PdfReadError, FileNotDecryptedError
 
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 MODEL1 = "claude-opus-4-5"
 MODEL2 = "claude-sonnet-4-5"
+_MAX_PDF_BYTES = 32 * 1024 * 1024
+
+logger = logging.getLogger(__name__)
 
 
 def _pdf_to_base64(pdf_bytes: bytes) -> str:
     return base64.b64encode(pdf_bytes).decode("utf-8")
 
 
+def _normalizar_pdf(pdf_bytes: bytes, etiqueta: str) -> bytes:
+    """Valida y reescribe el PDF para que Anthropic lo acepte.
+
+    Caso real (fojas.cl / mandatos con firma electrónica):
+    - El archivo empieza con basura HTML (`<br>-->...`) y el `%PDF` va más adelante.
+    - El PDF viene cifrado con contraseña de usuario vacía.
+    Anthropic exige que el archivo empiece en `%PDF` y rechaza cifrados:
+    400 'The PDF specified was not valid'.
+    """
+    if not pdf_bytes:
+        raise RuntimeError(f"El archivo {etiqueta} está vacío.")
+    if len(pdf_bytes) > _MAX_PDF_BYTES:
+        raise RuntimeError(
+            f"El archivo {etiqueta} pesa {len(pdf_bytes) // (1024 * 1024)} MB. "
+            "El máximo aceptado es 32 MB."
+        )
+
+    start = pdf_bytes.find(b"%PDF")
+    if start == -1:
+        raise RuntimeError(
+            f"El archivo {etiqueta} no es un PDF válido. "
+            "Verifica que sea el documento original y no una imagen, captura o Word."
+        )
+    if start > 0:
+        logger.info("PDF %s: se recortaron %s bytes de basura antes de %%PDF", etiqueta, start)
+    raw = pdf_bytes[start:]
+
+    try:
+        reader = PdfReader(BytesIO(raw), strict=False)
+    except (PdfReadError, Exception) as e:
+        logger.warning("No se pudo abrir %s con pypdf (%s); se envía recortado.", etiqueta, e)
+        return raw
+
+    estaba_cifrado = bool(reader.is_encrypted)
+    if estaba_cifrado:
+        unlocked = False
+        for pwd in ("", " "):
+            try:
+                if reader.decrypt(pwd):
+                    unlocked = True
+                    break
+            except (FileNotDecryptedError, Exception):
+                continue
+        if not unlocked:
+            raise RuntimeError(
+                f"El PDF {etiqueta} está protegido con contraseña. "
+                "Ábrelo, quítale la protección (Archivo → Imprimir → Guardar como PDF) e inténtalo de nuevo."
+            )
+
+    if not reader.pages:
+        raise RuntimeError(f"El PDF {etiqueta} no tiene páginas.")
+
+    try:
+        writer = PdfWriter()
+        writer.append(reader)
+        buf = BytesIO()
+        writer.write(buf)
+        normalized = buf.getvalue()
+    except Exception as e:
+        if estaba_cifrado:
+            raise RuntimeError(
+                f"El PDF {etiqueta} está cifrado y no se pudo reescribir para el extractor. "
+                "Ábrelo y guárdalo como PDF nuevo (Imprimir → Guardar como PDF)."
+            ) from e
+        logger.warning("No se pudo reescribir %s (%s); se envía recortado.", etiqueta, e)
+        return raw
+
+    if not normalized.startswith(b"%PDF") or len(normalized) < 100:
+        if estaba_cifrado:
+            raise RuntimeError(
+                f"El PDF {etiqueta} quedó ilegible al quitar la protección. "
+                "Guárdalo como PDF nuevo e inténtalo de nuevo."
+            )
+        return raw
+
+    logger.info(
+        "PDF %s normalizado: %s bytes → %s bytes, %s páginas, cifrado=%s",
+        etiqueta, len(pdf_bytes), len(normalized), len(reader.pages), estaba_cifrado,
+    )
+    return normalized
+
+
+def _error_pdf_invalido(etiqueta: str, exc: Exception) -> RuntimeError:
+    return RuntimeError(
+        f"El PDF {etiqueta} no pudo ser leído por el extractor. "
+        "Suele pasar si el archivo está dañado, protegido o no es un PDF real. "
+        "Prueba abrirlo y 'imprimir a PDF' (Guardar como PDF) e inténtalo de nuevo. "
+        f"Detalle: {exc}"
+    )
+
+
+def _crear_cliente() -> Anthropic:
+    if not API_KEY:
+        raise RuntimeError("Falta ANTHROPIC_API_KEY en el entorno.")
+    return Anthropic(api_key=API_KEY)
+
+
 def extract_json_mandato_from_pdf(pdf_bytes: bytes) -> dict:
-    encoded_pdf = _pdf_to_base64(pdf_bytes)
-    client = Anthropic(api_key=API_KEY)
+    encoded_pdf = _pdf_to_base64(_normalizar_pdf(pdf_bytes, "del mandato"))
+    client = _crear_cliente()
 
     system_prompt = (
         "Eres un extractor de datos legal. Devuelve SOLO JSON minificado (una línea), con las claves exactas:\n"
@@ -54,19 +157,24 @@ def extract_json_mandato_from_pdf(pdf_bytes: bytes) -> dict:
         "Responde ÚNICAMENTE con el JSON solicitado, sin texto adicional."
     )
 
-    response = client.messages.create(
-        model=MODEL1,
-        max_tokens=1500,
-        temperature=0,
-        system=system_prompt,
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Extrae los campos requeridos del siguiente PDF con el mandato notarial escaneado. Devuelve solo JSON."},
-                {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": encoded_pdf}}
-            ]
-        }]
-    )
+    try:
+        response = client.messages.create(
+            model=MODEL1,
+            max_tokens=1500,
+            temperature=0,
+            system=system_prompt,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extrae los campos requeridos del siguiente PDF con el mandato notarial escaneado. Devuelve solo JSON."},
+                    {"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": encoded_pdf}}
+                ]
+            }]
+        )
+    except BadRequestError as e:
+        raise _error_pdf_invalido("del mandato", e) from e
+    except APIError as e:
+        raise RuntimeError(f"Error del servicio de extracción (mandato): {e}") from e
 
     content_blocks = response.content
     if not content_blocks or content_blocks[0].type != "text":
@@ -230,19 +338,22 @@ def parse_float_or_null(v):
 
 
 def extraer_json_liquidacion(pdf_bytes: bytes) -> dict:
-    if not API_KEY:
-        raise RuntimeError("Falta ANTHROPIC_API_KEY en el entorno.")
-    client = Anthropic(api_key=API_KEY)
-    encoded = _pdf_to_base64(pdf_bytes)
+    client = _crear_cliente()
+    encoded = _pdf_to_base64(_normalizar_pdf(pdf_bytes, "de saldo de precio"))
     content, system_prompt = construir_mensaje_liquidacion(encoded)
 
-    resp = client.messages.create(
-        model=MODEL2,
-        max_tokens=800,
-        temperature=0,
-        system=system_prompt,
-        messages=[{"role": "user", "content": content}],
-    )
+    try:
+        resp = client.messages.create(
+            model=MODEL2,
+            max_tokens=800,
+            temperature=0,
+            system=system_prompt,
+            messages=[{"role": "user", "content": content}],
+        )
+    except BadRequestError as e:
+        raise _error_pdf_invalido("de saldo de precio", e) from e
+    except APIError as e:
+        raise RuntimeError(f"Error del servicio de extracción (saldo de precio): {e}") from e
 
     if not resp.content or resp.content[0].type != "text":
         raise RuntimeError("Respuesta inesperada del modelo de Anthropic.")

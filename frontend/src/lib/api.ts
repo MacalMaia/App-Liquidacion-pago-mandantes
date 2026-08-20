@@ -44,7 +44,14 @@ export async function liquidar(
   );
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail ?? "Error desconocido");
+    const detail = err.detail;
+    const msg =
+      typeof detail === "string"
+        ? detail
+        : Array.isArray(detail)
+          ? detail.map((d: { msg?: string }) => d.msg ?? JSON.stringify(d)).join("; ")
+          : (detail && JSON.stringify(detail)) || res.statusText;
+    throw new Error(msg || "Error desconocido");
   }
   return res.json();
 }
