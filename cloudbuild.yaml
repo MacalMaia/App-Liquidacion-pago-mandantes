@@ -11,10 +11,10 @@
 #     --substitutions _PROJECT_ID=mi-proyecto,_REGION=southamerica-west1
 
 substitutions:
-  _PROJECT_ID: "TU-PROYECTO-GCP"
+  _PROJECT_ID: "prod-microservices-473214"
   _REGION: "southamerica-west1"
-  _SERVICE_NAME: "liquidador"
-  _REPO_NAME: "liquidador-repo"
+  _SERVICE_NAME: "app-liquidacion-pago-mandantes"
+  _REPO_NAME: "cloud-run-source-deploy"
 
 steps:
   # 1. Build imagen Docker
@@ -56,11 +56,12 @@ steps:
       - "4"
       - --max-instances
       - "5"
-      # Las variables/secretos de SSO se gestionan directamente en el servicio
-      # de Cloud Run (panel "Variables y secretos"). Un deploy sin --set-env-vars
-      # ni --set-secrets conserva las variables ya configuradas en el servicio.
-      - --set-secrets
-      - "ANTHROPIC_API_KEY=anthropic-api-key:latest"
+      # TODAS las variables (ANTHROPIC_API_KEY, SSO, etc.) se gestionan como
+      # variables de entorno directamente en el servicio de Cloud Run
+      # (panel "Variables y secretos"). Un deploy SIN --set-env-vars ni
+      # --set-secrets conserva intactas las variables ya configuradas.
+      # NO agregar --set-secrets aquí: ANTHROPIC_API_KEY ya existe como
+      # variable de entorno normal y forzarla como secret rompe el deploy.
 
 images:
   - "${_REGION}-docker.pkg.dev/${_PROJECT_ID}/${_REPO_NAME}/${_SERVICE_NAME}:$COMMIT_SHA"
