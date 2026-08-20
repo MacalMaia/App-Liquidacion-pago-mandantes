@@ -49,78 +49,68 @@ npm run dev          # http://localhost:5173 (proxy a :8000 via vite.config.ts)
 
 ### Deploy en GCP Cloud Run
 
-#### 1. Configuración inicial (solo una vez)
+#### Datos de producción actuales
 
-```bash
-PROJECT_ID="TU-PROYECTO-GCP"   # cambia esto
-REGION="southamerica-west1"
-SERVICE="liquidador"
-REPO="liquidador-repo"
+| Parámetro | Valor |
+|---|---|
+| Proyecto GCP | `prod-microservices-473214` |
+| Región | `southamerica-west1` |
+| Servicio Cloud Run | `app-liquidacion-pago-mandantes` |
+| Repositorio Artifact Registry | `cloud-run-source-deploy` |
+| URL de producción | `https://app-liquidacion-pago-mandantes-150247226935.southamerica-west1.run.app` |
 
-# Habilitar APIs
-gcloud services enable run.googleapis.com \
-  cloudbuild.googleapis.com \
-  artifactregistry.googleapis.com \
-  secretmanager.googleapis.com \
-  --project=$PROJECT_ID
+#### Variables de entorno en producción
 
-# Crear repositorio de imágenes
-gcloud artifacts repositories create $REPO \
-  --repository-format=docker \
-  --location=$REGION \
-  --project=$PROJECT_ID
+Todas las variables están configuradas como **variables de entorno normales** en el panel
+"Variables y secretos" del servicio Cloud Run (NO como GCP Secrets). Para cambiarlas:
+Cloud Run → Servicios → `app-liquidacion-pago-mandantes` → Editar → Variables y secretos.
 
-# Guardar API key como secret
-echo -n "sk-ant-TU-API-KEY" | \
-  gcloud secrets create anthropic-api-key \
-    --data-file=- \
-    --replication-policy=automatic \
-    --project=$PROJECT_ID
+| Variable | Descripción |
+|---|---|
+| `ANTHROPIC_API_KEY` | API key de Anthropic |
+| `AZURE_CLIENT_ID_SSO` | Application (client) ID del registro en Entra ID |
+| `AZURE_TENANT_ID_SSO` | Directory (tenant) ID |
+| `MS_CLIENT_SECRET` | Client secret del registro en Entra ID |
+| `MS_REDIRECT_URI` | `https://<url-servicio>/auth/callback` |
+| `ALLOWED_ORIGINS` | Origen permitido por CORS (URL del servicio) |
+| `SESSION_SECRET` | Clave aleatoria para firmar cookies de sesión |
 
-# Dar acceso al Cloud Build service account al secret
-PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
-gcloud secrets add-iam-policy-binding anthropic-api-key \
-  --member="serviceAccount:${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor" \
-  --project=$PROJECT_ID
+> ⚠️ **CRÍTICO:** el `cloudbuild.yaml` NO debe tener `--set-secrets` ni `--set-env-vars`.
+> Si se agrega `--set-secrets ANTHROPIC_API_KEY=...`, el deploy falla porque la variable
+> ya existe como env var normal y no se puede cambiar de tipo.
 
-# Lo mismo para la cuenta de Cloud Run
-gcloud secrets add-iam-policy-binding anthropic-api-key \
-  --member="serviceAccount:${PROJECT_NUMBER}-compute@developer.gserviceaccount.com" \
-  --role="roles/secretmanager.secretAccessor" \
-  --project=$PROJECT_ID
-```
+#### Deploy manual (procedimiento actual)
 
-#### 2. Deploy
+El trigger automático de GitHub no está disparándose. Hasta que se repare, **todo deploy
+se hace con este comando** desde la raíz del repo:
 
 ```bash
 gcloud builds submit --config cloudbuild.yaml \
-  --substitutions _PROJECT_ID=$PROJECT_ID,_REGION=$REGION,_SERVICE_NAME=$SERVICE,_REPO_NAME=$REPO \
-  --project=$PROJECT_ID
+  --substitutions COMMIT_SHA=$(git rev-parse HEAD) \
+  --project=prod-microservices-473214
 ```
 
-#### 3. Ver la URL del servicio
+Los defaults del `cloudbuild.yaml` ya tienen el proyecto, región, servicio y repo correctos.
+El comando sube el código local, construye la imagen Docker y despliega en Cloud Run (~4 min).
+
+#### Ver la revisión activa
 
 ```bash
-gcloud run services describe $SERVICE --region=$REGION --format='value(status.url)'
+gcloud run services describe app-liquidacion-pago-mandantes \
+  --region=southamerica-west1 --project=prod-microservices-473214 \
+  --format="value(status.latestReadyRevisionName, spec.template.spec.containers[0].image)"
 ```
 
-### Activar SSO Microsoft (cuando se requiera)
+#### SSO Microsoft (activo)
 
-1. Registrar aplicación en Azure AD (portal.azure.com → App registrations).
-2. Agregar secrets en Secret Manager:
-   ```bash
-   gcloud secrets create ms-client-id --data-file=- <<< "TU-CLIENT-ID"
-   gcloud secrets create ms-tenant-id --data-file=- <<< "TU-TENANT-ID"
-   gcloud secrets create ms-client-secret --data-file=- <<< "TU-SECRET"
-   ```
-3. Agregar al `--set-secrets` en `cloudbuild.yaml`:
-   ```
-   MS_CLIENT_ID=ms-client-id:latest,MS_TENANT_ID=ms-tenant-id:latest,MS_CLIENT_SECRET=ms-client-secret:latest
-   ```
-4. En `backend/app/main.py`, descomentar las líneas del `MicrosoftSSOMiddleware`.
-5. En `backend/app/auth/sso_microsoft.py`, descomentar todo el código.
-6. Redesplegar.
+El SSO ya está habilitado y funcionando. Las credenciales están en las variables de entorno
+del servicio (ver tabla arriba). El middleware se activa automáticamente cuando
+`AZURE_CLIENT_ID_SSO`, `AZURE_TENANT_ID_SSO` y `MS_CLIENT_SECRET` están definidas.
+
+- Rutas de auth: `/auth/login`, `/auth/callback`, `/auth/logout`, `/auth/me`
+- El Redirect URI registrado en Azure debe ser exactamente: `https://<url-servicio>/auth/callback`
+- Los nombres de variable aceptados son `AZURE_CLIENT_ID_SSO`/`AZURE_TENANT_ID_SSO` (como
+  están en el panel) O `MS_CLIENT_ID`/`MS_TENANT_ID` — el código acepta ambos.
 
 ---
 
@@ -395,6 +385,116 @@ Ambas llamadas usan `temperature=0` y `max_tokens=800`. Los PDFs se envían como
 
 ## Notas operacionales
 
-- La API key de Anthropic está hardcodeada en `pago_mandates.py` (variable `API_KEY`). Para producción se recomienda mover a variable de entorno.
+- La API key de Anthropic está en la variable de entorno `ANTHROPIC_API_KEY` del servicio Cloud Run.
 - El venv está compilado para Windows (Python 3.13). En macOS/Linux se necesita recrear el venv.
 - Si la liquidación CORE trae la columna "CARGO" en UF (sin CLP), la app calcula `adj_pesos = UF × valor_UF` y muestra una alerta informativa en pantalla y en el PDF.
+
+---
+
+## Problemas conocidos, soluciones y lecciones aprendidas
+
+Esta sección documenta los problemas reales encontrados en producción y cómo se resolvieron,
+para no repetir el ciclo de diagnóstico.
+
+### 1. PDFs de fojas.cl rechazados por Anthropic (400 "The PDF specified was not valid")
+
+**Síntoma:** POST a `/api/liquidar` devuelve 500. El log muestra
+`anthropic.BadRequestError: The PDF specified was not valid`.
+
+**Causa:** Los mandatos notariales descargados de fojas.cl tienen dos problemas que Anthropic
+no acepta:
+1. El archivo empieza con basura HTML (`<br>-->?...`) y el `%PDF` real está en el byte 145.
+2. El PDF viene cifrado con contraseña de usuario vacía (firma electrónica avanzada).
+
+**Solución implementada:** `_normalizar_pdf()` en `pago_mandates.py` que, antes de enviar
+el PDF a Anthropic:
+1. Recorta todo lo que hay antes de `%PDF`.
+2. Desbloquea la contraseña vacía con `pypdf`.
+3. Reescribe el PDF ya sin cifrado.
+
+**Dependencias requeridas:** `pypdf[crypto]>=5.0.0` en `requirements.txt`. El `[crypto]`
+es obligatorio para poder descifrar; sin él, pypdf falla al intentar desbloquear el PDF.
+
+---
+
+### 2. `anthropic 1.0.0` rompe la API (`Messages.create() got an unexpected keyword argument 'temperature'`)
+
+**Síntoma:** POST a `/api/liquidar` devuelve 422 con el mensaje de error anterior.
+
+**Causa:** En agosto 2026 se publicó `anthropic 1.0.0`, que cambió la API de
+`Messages.create()` e incompatibilizó con el código existente (entre otros, ya no acepta
+`temperature` como kwarg directo).
+
+**Solución:** `requirements.txt` pina `anthropic>=0.68.0,<1.0` para usar la última versión
+estable 0.x (0.125.0 al momento del fix). Migrar a la API 1.0 requiere revisar el changelog
+de Anthropic y actualizar las llamadas en `pago_mandates.py`.
+
+---
+
+### 3. El trigger automático de GitHub no dispara builds en Cloud Build
+
+**Síntoma:** Se hace `git push origin main` pero no aparece ningún build nuevo en Cloud Build.
+La revisión activa en Cloud Run sigue siendo la anterior.
+
+**Causa:** El webhook de GitHub hacia Cloud Build dejó de funcionar (causa exacta no
+investigada, posiblemente expiración de tokens o cambio en la configuración del trigger).
+
+**Workaround (deploy manual):**
+```bash
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions COMMIT_SHA=$(git rev-parse HEAD) \
+  --project=prod-microservices-473214
+```
+
+**Diagnóstico:** Para verificar qué revisión está activa y qué commit tiene:
+```bash
+gcloud run services describe app-liquidacion-pago-mandantes \
+  --region=southamerica-west1 --project=prod-microservices-473214 \
+  --format="value(status.latestReadyRevisionName, spec.template.spec.containers[0].image)"
+```
+El SHA al final del nombre de imagen debe coincidir con `git rev-parse HEAD`.
+
+---
+
+### 4. Deploy falla: "Cannot update environment variable ANTHROPIC_API_KEY to the given type"
+
+**Síntoma:** El paso 3 (deploy) del `gcloud builds submit` falla con ese mensaje.
+
+**Causa:** El `cloudbuild.yaml` tenía `--set-secrets ANTHROPIC_API_KEY=anthropic-api-key:latest`,
+pero `ANTHROPIC_API_KEY` ya existía en el servicio como variable de entorno normal (no como
+GCP Secret). Cloud Run no permite cambiar el tipo de una variable en un deploy.
+
+**Solución:** Eliminar cualquier `--set-secrets` y `--set-env-vars` del paso de deploy en
+`cloudbuild.yaml`. Sin esos flags, el deploy preserva intactas todas las variables que ya
+están configuradas en el servicio.
+
+---
+
+### 5. El build falla en el paso de push: "Repository 'liquidador-repo' not found"
+
+**Síntoma:** El paso de docker push falla con `name unknown: Repository "liquidador-repo" not found`.
+
+**Causa:** El `cloudbuild.yaml` tenía `_REPO_NAME: "liquidador-repo"` como default, pero ese
+repositorio no existe en Artifact Registry. El repositorio real se llama `cloud-run-source-deploy`.
+
+**Solución:** Los defaults del `cloudbuild.yaml` ya fueron corregidos. Si se necesita
+inspeccionarlos: `gcloud artifacts repositories list --project=prod-microservices-473214`.
+
+---
+
+### 6. Formato del documento de liquidación cambió (SALDO-PRECIO vs Liquidación de Pago)
+
+**Síntoma:** La comisión se calcula sobre un valor erróneo; el sistema confunde el total
+abonado por el comprador con el valor de adjudicación.
+
+**Causa:** El sistema MAIA cambió el formato del documento fuente de "Liquidación de Pago"
+a "SALDO - PRECIO". En el nuevo formato no siempre existe una columna en pesos para la
+adjudicación, y el modelo de IA confundía la fila "ABONADO AL" (total pagado por el
+comprador) con el valor de adjudicación.
+
+**Solución implementada:**
+1. El prompt de extracción reconoce ambos formatos (A y B) y prohíbe usar "ABONADO AL"
+   como valor de adjudicación.
+2. El cálculo siempre usa `UF adjudicada × valor UF del día` como fuente de verdad para
+   la adjudicación en pesos (campo inequívoco en ambos formatos), y el valor extraído por
+   la IA solo sirve como chequeo cruzado que genera una alerta si discrepa.
